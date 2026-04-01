@@ -591,6 +591,8 @@ def main():
         st.session_state.merge_order_ids = []
     if "master_dupes" not in st.session_state:
         st.session_state.master_dupes = pd.DataFrame()
+    if "split_source_df" not in st.session_state:
+        st.session_state.split_source_df = pd.DataFrame()
 
     tab1, tab2, tab3, tab4 = st.tabs(
         [
@@ -747,6 +749,12 @@ def main():
     with tab3:
         st.subheader("Upload Bulk Canva Certificate PDF")
         uploaded_pdf = st.file_uploader("Bulk Certificate PDF", type=["pdf"], key="bulk_pdf")
+        ready_list_csv = st.file_uploader(
+            "Optional: Upload ready participant list CSV (for direct split)",
+            type=["csv"],
+            key="ready_list_csv",
+            help="If provided, Step 3 uses this CSV instead of Step 1 master list. Include Name/Full Name and optional Email.",
+        )
         has_merged_pdf = st.session_state.merged_pdf_bytes is not None
         pdf_bytes_for_split = st.session_state.merged_pdf_bytes if has_merged_pdf else None
 
@@ -754,6 +762,8 @@ def main():
             st.info("Using merged PDF from Step 2. Upload a file below only if you want to override it.")
         if uploaded_pdf is not None:
             pdf_bytes_for_split = uploaded_pdf.read()
+        if ready_list_csv is not None:
+            st.info("Using uploaded ready-list CSV as participant source for Split + Rename.")
 
         match_mode = st.radio(
             "Matching Logic",
@@ -766,16 +776,26 @@ def main():
         if st.button("Split and Rename Certificates", type="primary"):
             if pdf_bytes_for_split is None:
                 st.error("Upload a bulk certificate PDF in Step 3 or merge files in Step 2 first.")
-            elif st.session_state.master_df.empty:
-                st.error("Generate the final participant master list in Step 1 first.")
             else:
                 try:
-                    zip_blob, mapping_df = split_and_rename_certificates(
-                        pdf_bytes_for_split, st.session_state.master_df, match_mode
-                    )
-                    st.session_state.split_zip = zip_blob
-                    st.session_state.split_mapping = mapping_df
-                    st.success("Certificates split and renamed successfully.")
+                    source_df = pd.DataFrame()
+                    if ready_list_csv is not None:
+                        ready_raw = pd.read_csv(io.BytesIO(ready_list_csv.getvalue()))
+                        ready_parsed, _ = parse_uploaded_csv(ready_raw, "Ready List CSV", uppercase_output=False)
+                        source_df = ready_parsed.copy()
+                    else:
+                        source_df = st.session_state.master_df.copy()
+
+                    if source_df.empty:
+                        st.error("No participants available. Generate Step 1 list or upload a ready-list CSV.")
+                    else:
+                        zip_blob, mapping_df = split_and_rename_certificates(
+                            pdf_bytes_for_split, source_df, match_mode
+                        )
+                        st.session_state.split_zip = zip_blob
+                        st.session_state.split_mapping = mapping_df
+                        st.session_state.split_source_df = source_df
+                        st.success("Certificates split and renamed successfully.")
                 except Exception as exc:
                     st.exception(exc)
 
@@ -851,8 +871,13 @@ def main():
             else:
                 try:
                     name_email_map = {}
-                    if not st.session_state.master_df.empty:
-                        for _, row in st.session_state.master_df.iterrows():
+                    source_for_qr = (
+                        st.session_state.split_source_df
+                        if not st.session_state.split_source_df.empty
+                        else st.session_state.master_df
+                    )
+                    if not source_for_qr.empty:
+                        for _, row in source_for_qr.iterrows():
                             name_email_map[normalize_name_for_match(row["Full Name"])] = row["Email Address"]
 
                     input_zip = zipfile.ZipFile(io.BytesIO(cert_zip.read()), "r")
